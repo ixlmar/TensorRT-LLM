@@ -226,12 +226,8 @@ def test_llm_with_postprocess_parallel_and_result_handler(streaming):
                                                          tp_size=1)
 
 
-@pytest.mark.parametrize(
-    "enable_logprobs",
-    [True],
-)
 @pytest.mark.part0
-def test_embedding_bias_with_torch_sampler_strategies(enable_logprobs):
+def test_embedding_bias_with_torch_sampler_strategies():
     """Test embedding bias application in TorchSampler."""
     tokenizer = AutoTokenizer.from_pretrained(llama_model_path)
     biased_word_id = tokenizer.encode("Z", add_special_tokens=False)[-1]
@@ -244,8 +240,6 @@ def test_embedding_bias_with_torch_sampler_strategies(enable_logprobs):
         "embedding_bias": embedding_bias,
     }
 
-    if enable_logprobs:
-        sampling_kwargs["logprobs"] = 1
     # All test cases use greedy sampling for simplicity
 
     sampling_params = SamplingParams(**sampling_kwargs)
