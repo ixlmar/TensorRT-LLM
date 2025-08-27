@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import enum
+from types import EllipsisType  # https://stackoverflow.com/a/66636313
 from typing import Optional, Tuple, TypeAlias, Union, cast
 
 import torch
@@ -24,8 +25,8 @@ from ..flashinfer_utils import IS_FLASHINFER_AVAILABLE
 
 class RMSNorm(nn.Module):
 
-    _ARGUMENT_NOT_SPECIFIED_SENTINEL = ()
-    _ArgumentNotSpecifiedSentinelType: TypeAlias = Tuple[()]
+    _ARGUMENT_NOT_SPECIFIED_SENTINEL = ...
+    _ArgumentNotSpecifiedSentinelType: TypeAlias = EllipsisType
 
     def __init__(
         self,
