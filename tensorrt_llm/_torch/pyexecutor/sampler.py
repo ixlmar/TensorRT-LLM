@@ -1024,6 +1024,9 @@ class TorchSampler(Sampler):
             return bias_index
 
         # Indices of unique bias tensors
+        #
+        # NB: hash(torch.Tensor) is equivalent to id(torch.Tensor), and does not
+        #     depend on tensor contents, cf. https://github.com/pytorch/pytorch/issues/2569
         bias_to_index: dict[torch.Tensor,
                             int] = defaultdict(provision_bias_index)
 
