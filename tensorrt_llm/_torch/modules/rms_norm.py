@@ -48,12 +48,12 @@ class RMSNorm(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor] = ...,
+        residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         if IS_FLASHINFER_AVAILABLE:
             from ..custom_ops import (flashinfer_fused_add_rmsnorm,
                                       flashinfer_rmsnorm)
-            if isinstance(residual, torch.Tensor):
+            if residual is not None:
                 flashinfer_fused_add_rmsnorm(hidden_states, residual,
                                              self.weight, self.variance_epsilon)
             else:
@@ -62,7 +62,7 @@ class RMSNorm(nn.Module):
         else:
             input_dtype = hidden_states.dtype
             hidden_states = hidden_states.to(torch.float32)
-            if isinstance(residual, torch.Tensor):
+            if residual is not None:
                 hidden_states = hidden_states + residual.to(torch.float32)
                 residual = hidden_states.to(input_dtype)
 
@@ -71,7 +71,7 @@ class RMSNorm(nn.Module):
                                                         self.variance_epsilon)
             hidden_states = self.weight * hidden_states.to(input_dtype)
 
-        if residual is ...:
+        if residual is None:
             return hidden_states
         else:
             return hidden_states, residual
@@ -79,9 +79,9 @@ class RMSNorm(nn.Module):
     def skip_forward(
         self,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor] = ...,
+        residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        if residual is ...:
+        if residual is None:
             return hidden_states
         else:
             return hidden_states, residual
