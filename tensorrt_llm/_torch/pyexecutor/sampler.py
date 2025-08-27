@@ -1,11 +1,12 @@
 import dataclasses
 import enum
+import sys
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
 from itertools import repeat
-from typing import Any, List, Literal, Optional, cast, override
+from typing import Any, List, Literal, Optional, cast
 
 import torch
 
@@ -28,6 +29,11 @@ from tensorrt_llm.mapping import Mapping
 from .finish_reason import FinishedState
 from .llm_request import LlmRequest, LlmRequestState, get_draft_token_length
 from .scheduler import ScheduledRequests
+
+if sys.version_info[:2] >= (3, 12):
+    from typing import override
+else:
+    from typing_extensions import override
 
 
 @dataclass(kw_only=True)
