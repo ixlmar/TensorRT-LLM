@@ -309,7 +309,8 @@ def get_rejected_indices(draft_probs: torch.Tensor, target_probs: torch.Tensor,
         device=generator.device, non_blocking=True)
     p = draft_probs[token_idx, draft_tokens_cuda]
     q = target_probs.squeeze(0)[token_idx, draft_tokens_cuda]
-    accept_probs = torch.minimum(torch.ones(()), q / p)
+    accept_probs = torch.minimum(
+        torch.ones((), device=generator.device, dtype=q.dtype), q / p)
     # Use deterministic random generation for multi-GPU consistency
     rejected_indices = (torch.rand(accept_probs.shape,
                                    generator=generator,
