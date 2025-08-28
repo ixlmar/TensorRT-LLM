@@ -265,7 +265,7 @@ class ModelDrafter(Drafter):
         return outputs
 
     def _sample_async(self, draft_batch: ScheduledRequests,
-                      outputs: Dict[str, Any]) -> SampleState:
+                      outputs: Dict[str, Any]) -> Optional[SampleState]:
         """Sample tokens from draft model outputs."""
         try:
             num_context_logits_prefix_sum = [0]
