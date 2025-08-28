@@ -237,6 +237,7 @@ def top_p_sampling_batch(
 
 
 def top_k_top_p_sampling_batch(logits: torch.Tensor,
+                               *,
                                top_k: int,
                                top_p: float,
                                temperature: float = 1.0,
@@ -339,19 +340,23 @@ Strategy = TopK | TopP | Greedy | TopKTopP
 
 
 def _request_strategy(request: LlmRequest) -> Strategy:
+    # top_p and top_K with temperature=0.0 reduces to greedy
+    # sampling
+    temperature = request.sampling_config.temperature
+    if temperature is not None:
+        temperature = temperature[0]
+        if temperature == 0.0:
+            return GREEDY
+
     if request.sampling_config.top_k is not None and len(
             request.sampling_config.top_k
     ) > 0 and request.sampling_config.top_p is not None and len(
             request.sampling_config.top_p) > 0:
         return ("top_k_top_p", request.sampling_config.top_k[0],
-                request.sampling_config.top_p[0],
-                request.sampling_config.temperature[0])
-    if request.sampling_config.top_p is not None and len(
+                request.sampling_config.top_p[0], temperature)
+    elif request.sampling_config.top_p is not None and len(
             request.sampling_config.top_p) > 0:
         top_p = request.sampling_config.top_p[0]
-        temperature = request.sampling_config.temperature
-        if temperature is not None:
-            temperature = temperature[0]
         return ("top_p", top_p, temperature)
     elif request.sampling_config.top_k is not None and len(
             request.sampling_config.top_k) > 0:
@@ -387,13 +392,20 @@ def sample(
         case ("top_k", top_k):
             tokens, softmax = top_k_sampling_batch(logits, top_k, generator)
         case ("top_p", top_p, temperature):
-            kwargs = dict(top_p=top_p, generator=generator)
-            if temperature is not None:
-                kwargs["temperature"] = temperature
-            tokens, softmax = top_p_sampling_batch(logits, **kwargs)
+            tokens, softmax = top_p_sampling_batch(
+                logits,
+                top_p=top_p,
+                generator=generator,
+                **(dict(temperature=temperature)
+                   if temperature is not None else dict()))
         case ("top_k_top_p", top_k, top_p, temperature):
             tokens, softmax = top_k_top_p_sampling_batch(
-                logits, top_k, top_p, temperature, generator)
+                logits,
+                top_k=top_k,
+                top_p=top_p,
+                generator=generator,
+                **(dict(temperature=temperature)
+                   if temperature is not None else dict()))
         case ("greedy", None):
             tokens, softmax = greedy_search_sampling_batch(
                 logits, softmax_indices=softmax_indices)
