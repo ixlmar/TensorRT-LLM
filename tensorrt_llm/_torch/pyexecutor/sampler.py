@@ -1011,7 +1011,6 @@ class TorchSampler(Sampler):
                                                  model_outputs,
                                                  new_tokens,
                                                  num_context_logits_prefix_sum,
-                                                 seq_slots_cuda=seq_slots,
                                                  seq_slots=seq_slots_host,
                                                  log_probs_host=log_probs_host)
         self._write_finish_reasons(requests,
@@ -1108,35 +1107,29 @@ class TorchSampler(Sampler):
             return
         assert req_bias is not None  # otherwise bias_to_index is empty
 
-        bias_tensor = torch.stack(bias_list).to(logits.device,
-                                                non_blocking=True)
-        logits = logits.clone()
+        bias_gather_indices_cuda = torch.tensor(bias_gather_indices,
+                                                pin_memory=True,
+                                                dtype=torch.int32).to(
+                                                    logits.device,
+                                                    non_blocking=True)
+        logits_bias_mask_cuda = logits_bias_mask.to(logits.device,
+                                                    non_blocking=True)
+        biases_tensor = torch.empty((len(bias_to_index), *req_bias.shape),
+                                    pin_memory=True)
+        biases_tensor = torch.stack(
+            tuple(bias_to_index.keys()),
+            out=biases_tensor,
+        )
+        biases_tensor_cuda = biases_tensor.to(logits.device, non_blocking=True)
 
-        if steps_per_request is None:
-            # Fast path: direct indexing
-            indices = torch.tensor(bias_data, device=logits.device)
-            logits[indices] += bias_tensor
-        else:
-            # Batched path: expand biases and use boolean mask
-            expanded_biases = torch.repeat_interleave(bias_tensor,
-                                                      torch.tensor(
-                                                          bias_data,
-                                                          device=logits.device),
-                                                      dim=0)
-
-            mask = torch.zeros(sum(steps_per_request),
-                               dtype=torch.bool,
-                               device=logits.device)
-            offset = 0
-            for i, req in enumerate(requests):
-                steps = steps_per_request[i]
-                if req._py_embedding_bias_1d is not None:
-                    mask[offset:offset + steps] = True
-                offset += steps
-
-            logits[mask] += expanded_biases
-
-        return logits
+        biases_tensor_cuda = torch.index_select(biases_tensor_cuda, 0,
+                                                bias_gather_indices_cuda)
+        # NB: Avoiding logits[bias_scatter_indices] += biases_tensor (and torch.Tensor.scatter_add_), because it
+        #     is unclear if this allows for repeated indices, cf.
+        #         https://docs.pytorch.org/docs/2.8/generated/torch.Tensor.index_put_.html#torch-tensor-index-put
+        #     and thus introduces read-after-write dependencies (including possible false
+        #     sharing).
+        logits[logits_bias_mask_cuda] += biases_tensor_cuda
 
     @staticmethod
     def _longest_stop_word_len(requests: Iterable[LlmRequest]) -> int:
@@ -1324,42 +1317,6 @@ class TorchSampler(Sampler):
             if step is not None:
                 per_step[step][request_idx] = True
         return per_step
-
-    def _process_requests(self,
-                          scheduled_requests: ScheduledRequests,
-                          model_outputs: dict[str, torch.Tensor],
-                          new_tokens: torch.Tensor,
-                          num_context_logits_prefix_sum: list[int],
-                          *,
-                          seq_slots: torch.Tensor,
-                          seq_slots_host: torch.Tensor,
-                          log_probs_host: torch.Tensor | None = None):
-
-        # raw_logits should contain only the logits from the gen requests.
-        # If return context logits is requested, fetch only the logits from gen requests.
-        bias_gather_indices_cuda = torch.tensor(bias_gather_indices,
-                                                pin_memory=True,
-                                                dtype=torch.int32).to(
-                                                    logits.device,
-                                                    non_blocking=True)
-        logits_bias_mask_cuda = logits_bias_mask.to(logits.device,
-                                                    non_blocking=True)
-        biases_tensor = torch.empty((len(bias_to_index), *req_bias.shape),
-                                    pin_memory=True)
-        biases_tensor = torch.stack(
-            tuple(bias_to_index.keys()),
-            out=biases_tensor,
-        )
-        biases_tensor_cuda = biases_tensor.to(logits.device, non_blocking=True)
-
-        biases_tensor_cuda = torch.index_select(biases_tensor_cuda, 0,
-                                                bias_gather_indices_cuda)
-        # NB: Avoiding logits[bias_scatter_indices] += biases_tensor (and torch.Tensor.scatter_add_), because it
-        #     is unclear if this allows for repeated indices, cf.
-        #         https://docs.pytorch.org/docs/2.8/generated/torch.Tensor.index_put_.html#torch-tensor-index-put
-        #     and thus introduces read-after-write dependencies (including possible false
-        #     sharing).
-        logits[logits_bias_mask_cuda] += biases_tensor_cuda
 
     def _sample_batched_by_strategy(
         self,
@@ -1657,7 +1614,10 @@ class TorchSampler(Sampler):
             new_tokens_cuda: torch.Tensor,
             num_context_logits_prefix_sum: list[int],
             *,
+            seq_slots: torch.Tensor,
             log_probs_host: torch.Tensor | None = None) -> torch.Tensor:
+        seq_slots = seq_slots.to(dtype=torch.int32)  # int32 suffices here
+
         raw_logits_cuda = model_outputs["logits"]
 
         requests = scheduled_requests.all_requests()
@@ -1671,9 +1631,6 @@ class TorchSampler(Sampler):
         #     and are thus only correct after _select_generated_logits() below.
         req_offsets, sum_steps = _PackedStepIndexer.calculate_request_offsets(
             req_num_steps, pin_memory=True)
-        seq_slots = torch.tensor([r.py_seq_slot for r in requests],
-                                 dtype=torch.int32,
-                                 pin_memory=True)
 
         raw_logits_cuda = self._select_generated_logits(
             scheduled_requests,
