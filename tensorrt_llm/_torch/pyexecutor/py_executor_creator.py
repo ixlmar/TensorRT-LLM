@@ -283,8 +283,8 @@ def create_py_executor(
             draft_spec_config.max_draft_len = 0
 
             use_chain_drafter = (
-                executor_config.guided_decoding_config is None and
-                False  # FIXME: 'not pytorch_backend_config.enable_mixed_sampler' no longer available
+                executor_config.guided_decoding_config is None
+                and draft_spec_config._allow_greedy_draft_tokens
                 and pytorch_backend_config.attn_backend == "TRTLLM")
 
             if use_chain_drafter:

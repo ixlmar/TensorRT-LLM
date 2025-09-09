@@ -354,7 +354,11 @@ class DecodingBaseConfig(StrictBaseModel):
     # When specified, speculation will be disabled at batch sizes above
     # this value. Otherwise, speculation will always be on.
     max_concurrency: Optional[int] = None
+
     load_format: Optional[str] = None
+
+    # If set, drafting uses greedy sampling, irrespective of sampling parameters.
+    _allow_greedy_draft_tokens: bool = PrivateAttr(True)
 
     @classmethod
     def from_dict(cls, data: dict):

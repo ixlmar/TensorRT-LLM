@@ -73,7 +73,7 @@ class ModelDrafter(Drafter):
         if self.use_static_draft_loop:
             # TODO: enable sampling/guided decoding on static draft loop
             assert guided_decoder is None
-            assert False, "non-greedy sampling is allowed"
+            assert spec_config._allow_greedy_draft_tokens
 
     def _create_draft_request(self, request: LlmRequest,
                               input_tokens: Optional[List]) -> LlmRequest:
