@@ -305,7 +305,7 @@ def get_rejected_indices(draft_probs: torch.Tensor, target_probs: torch.Tensor,
     token_idx = torch.arange(num_draft_tokens,
                              dtype=torch.int32,
                              device=generator.device)
-    draft_tokens_cuda = torch.tensor(draft_tokens, dtype=torch.int32).to(
+    draft_tokens_cuda = torch.tensor(draft_tokens, dtype=torch.int32, pin_memory=True).to(
         device=generator.device, non_blocking=True)
     p = draft_probs[token_idx, draft_tokens_cuda]
     q = target_probs.squeeze(0)[token_idx, draft_tokens_cuda]
@@ -490,7 +490,7 @@ def torch_multi_arange(ends: torch.Tensor,
         1)  # last element in preceding range (or 0)
     prev_range_ends[0] = 0
     ones = torch.tensor(
-        1, dtype=ends.dtype).to(device=ends.device).broadcast_to(ends.shape)
+        1, dtype=ends.dtype, pin_memory=True).to(device=ends.device, non_blocking=True).broadcast_to(ends.shape)
     if steps is None:
         steps = ones
     jumps = -prev_range_ends  # delta from one range to the next
