@@ -435,7 +435,7 @@ def int_tensor(shape: tuple[int, ...], device: str = 'cuda') -> torch.Tensor:
 @dataclass(kw_only=True, frozen=True)
 class _BatchedSamplingResult:
     # Original request indices for all requests (permuted due to batching by strategy):
-    batch_req_indices_cuda: torch.Tensor
+    batch_req_indices: torch.Tensor
     # Next tokens for all requests:
     batch_next_tokens_cuda: torch.Tensor
     # Probs for all requests which need them:
@@ -604,8 +604,11 @@ class _StepIndexTranslator(ABC):
             with the requests identified by req_indices, in the same order as
             req_indices.
         """
-        return self._index_map[req_indices].view(-1)[
-            self._index_mask[req_indices].view(-1)]
+        indices = self._index_map[req_indices].view(-1)
+        mask = self._index_mask[req_indices].view(-1)
+        # NB: Return value has dynamic shape (depends on mask nnz), which
+        #     implies stream sync if CUDA is used.
+        return indices[mask]
 
 
 # Helper class for _PackedStepIndexer and _UnpackedStepIndexer, facilitating the
@@ -1098,7 +1101,7 @@ class TorchSampler(Sampler):
         *,
         cuda_device: torch.device,
         log_probs_host: torch.Tensor | None = None,
-        req_num_steps_cuda: torch.Tensor,
+        req_num_steps: torch.Tensor,
         req_offsets: torch.Tensor,
         steps_dim_size: int,
     ) -> _BatchedSamplingResult:
@@ -1116,14 +1119,12 @@ class TorchSampler(Sampler):
                            and next(iter(requests_by_strategy)) != GREEDY)):
             raise ValueError("d2t does not yet support non-greedy sampling")
 
-        req_offsets_cuda = req_offsets.to(device=logits_cuda.device,
-                                          non_blocking=True)
         # Indexer for accessing tokens in 'logits_cuda', corresponding to the
         # requests in 'requests'.
         logits_cuda_indexer = _PackedStepIndexer(
-            num_steps=req_num_steps_cuda,
+            num_steps=req_num_steps,
             max_steps=steps_dim_size,
-            req_offsets=req_offsets_cuda,
+            req_offsets=req_offsets,
         )
 
         batched_results: list[tuple[torch.Tensor, torch.Tensor,
@@ -1132,10 +1133,8 @@ class TorchSampler(Sampler):
         ]  # see _BatchedSamplingResult for details
         softmax_index_offset = 0
         for strategy, group_req_indices in requests_by_strategy.items():
-            # Indices of 'requests' entries having the same sampling strategy,
-            # ordered ascending.
-            group_req_indices_cuda = group_req_indices.to(cuda_device,
-                                                          non_blocking=True)
+            # group_req_indices: Indices of 'requests' entries having the same sampling
+            # strategy, ordered ascending.
 
             # Indices of 'group_req_indices' entries corresponding to requests
             # with draft logits.
@@ -1147,51 +1146,42 @@ class TorchSampler(Sampler):
             # To skip softmax computation where it is not needed, track
             #   softmax_req_indices: Indices of 'requests' entries requesting probs
             #   softmax_grp_indices: Indices of 'speculation_group_indices' entries requesting probs
-            #   speculation_softmax_indices: Indices of 'softmax_grp_indices_cuda' entries corresponding
+            #   speculation_softmax_indices: Indices of 'softmax_grp_indices' entries corresponding
             #                                to requests with draft logits.
             if log_probs_host is not None:
                 softmax_req_indices = group_req_indices
-                softmax_grp_indices_cuda = torch.arange(
-                    len(group_req_indices),
-                    device=req_num_steps_cuda.device,
-                    dtype=torch.int32)
+                softmax_grp_indices = torch.arange(len(group_req_indices),
+                                                   dtype=torch.int32)
                 speculation_softmax_indices = torch.tensor(
                     speculation_group_indices, dtype=torch.int32)
             else:
                 speculation_group_indices_tensor = torch.tensor(
-                    speculation_group_indices,
-                    dtype=torch.int32,
-                    pin_memory=True)
-                softmax_req_indices = torch.empty_like(
-                    speculation_group_indices_tensor, pin_memory=True)
-                torch.index_select(group_req_indices,
-                                   0,
-                                   speculation_group_indices_tensor,
-                                   out=softmax_req_indices)
-                softmax_grp_indices_cuda = speculation_group_indices_tensor.to(
-                    device=req_num_steps_cuda.device, non_blocking=True)
+                    speculation_group_indices, dtype=torch.int32)
+                softmax_req_indices = group_req_indices[
+                    speculation_group_indices_tensor]
+                softmax_grp_indices = speculation_group_indices_tensor
                 speculation_softmax_indices = torch.arange(
                     len(speculation_group_indices), dtype=torch.int32)
-            softmax_req_indices_cuda = softmax_req_indices.to(
-                device=req_num_steps_cuda.device, non_blocking=True)
 
             group_logits_cuda_indices = logits_cuda_indexer[
-                group_req_indices_cuda]
+                group_req_indices].to(device=logits_cuda.device,
+                                      non_blocking=True)
             group_logits_cuda = logits_cuda[group_logits_cuda_indices]
 
             # Indexer for accessing tokens in 'group_logits_cuda' (and 'group_next_tokens_cuda')
-            # corresponding to the requests in 'group_req_indices_cuda'.
+            # corresponding to the requests in 'group_req_indices'.
             group_logits_cuda_indexer = _PackedStepIndexer(
-                num_steps=req_num_steps_cuda[group_req_indices_cuda],
+                num_steps=req_num_steps[group_req_indices],
                 max_steps=steps_dim_size)
             softmax_group_indices_cuda = group_logits_cuda_indexer[
-                softmax_grp_indices_cuda]
+                softmax_grp_indices].to(device=logits_cuda.device,
+                                        non_blocking=True)
 
             # Indexer for accessing tokens in 'group_softmax_cuda' corresponding to the
             # requests in 'softmax_req_indices'.
-            if softmax_req_indices is not group_req_indices_cuda:
+            if softmax_req_indices is not group_req_indices:
                 group_softmax_cuda_indexer = _PackedStepIndexer(
-                    num_steps=req_num_steps_cuda[softmax_req_indices_cuda],
+                    num_steps=req_num_steps[softmax_req_indices],
                     max_steps=steps_dim_size)
             else:
                 group_softmax_cuda_indexer = group_logits_cuda_indexer
@@ -1211,11 +1201,11 @@ class TorchSampler(Sampler):
                 softmax_indices=cast(torch.IntTensor,
                                      softmax_group_indices_cuda),
             )
-            batched_results.append((group_req_indices_cuda,
-                                    group_next_tokens_cuda, group_softmax_cuda))
+            batched_results.append(
+                (group_req_indices, group_next_tokens_cuda, group_softmax_cuda))
             softmax_index_offset += group_softmax_cuda.size(0)
         # Batched sampling results, see _BatchedSamplingResult for details.
-        batch_req_indices_cuda = torch.cat([res[0] for res in batched_results])
+        batch_req_indices = torch.cat([res[0] for res in batched_results])
         batch_next_tokens_cuda = torch.cat([res[1] for res in batched_results])
         batch_softmax_cuda = torch.cat([res[2] for res in batched_results])
 
@@ -1231,7 +1221,7 @@ class TorchSampler(Sampler):
             self._apply_d2t(batch_next_tokens_cuda, model_outputs)
 
         return _BatchedSamplingResult(
-            batch_req_indices_cuda=batch_req_indices_cuda,
+            batch_req_indices=batch_req_indices,
             batch_next_tokens_cuda=batch_next_tokens_cuda,
             batch_softmax_cuda=batch_softmax_cuda,
             py_draft_logits_indices=py_draft_logits_indices,
@@ -1242,14 +1232,14 @@ class TorchSampler(Sampler):
         batched_sampling_result: _BatchedSamplingResult,
         *,
         new_tokens_cuda: torch.Tensor,
-        req_num_steps_cuda: torch.Tensor,
-        seq_slots_cuda: torch.Tensor,
+        req_num_steps: torch.Tensor,
+        seq_slots: torch.Tensor,
         log_probs_host: torch.Tensor | None = None,
     ) -> torch.Tensor:
         beam = self.BEAM
         assert beam == 0, "beam_width != 1 not supported"
 
-        batch_req_indices_cuda = batched_sampling_result.batch_req_indices_cuda
+        batch_req_indices = batched_sampling_result.batch_req_indices
         batch_next_tokens_cuda = batched_sampling_result.batch_next_tokens_cuda
         batch_softmax_cuda = batched_sampling_result.batch_softmax_cuda
         py_draft_logits_indices = batched_sampling_result.py_draft_logits_indices
@@ -1277,8 +1267,8 @@ class TorchSampler(Sampler):
         # (packed request_idx and step dimensions) to linearized indices
         # in (steps, seq_slot).
         batch_destination_cuda_indexer = _UnpackedStepIndexer(
-            seq_slots=seq_slots_cuda[batch_req_indices_cuda],
-            num_steps=req_num_steps_cuda[batch_req_indices_cuda],
+            seq_slots=seq_slots[batch_req_indices],
+            num_steps=req_num_steps[batch_req_indices],
             steps_dim_size=new_tokens_cuda.size(0),
             slots_dim_size=new_tokens_cuda.size(1),
             dim_order=_UnpackedStepIndexer.DimOrder.STEP_MAJOR,
@@ -1288,7 +1278,8 @@ class TorchSampler(Sampler):
         # Batch update output tensors
         batch_next_tokens_cuda_int = batch_next_tokens_cuda.to(
             dtype=new_tokens_cuda.dtype, non_blocking=True)
-        batch_dest_indices_1d_cuda = batch_destination_cuda_indexer[:]
+        batch_dest_indices_1d_cuda = batch_destination_cuda_indexer[:].to(
+            new_tokens_cuda.device, non_blocking=True)
         new_tokens_cuda.view(-1,
                              *new_tokens_cuda.shape[2:])[:, beam, ...].scatter_(
                                  0, batch_dest_indices_1d_cuda,
@@ -1307,14 +1298,15 @@ class TorchSampler(Sampler):
                 log_probs_host, device=batch_dest_indices_1d_cuda.device)
             # FIXME: Needs a separate indexer because tensor layout differs from new_tokens_cuda
             batch_dest_probs_cuda_indexer = _UnpackedStepIndexer(
-                seq_slots=seq_slots_cuda[batch_req_indices_cuda],
-                num_steps=req_num_steps_cuda[batch_req_indices_cuda],
+                seq_slots=seq_slots[batch_req_indices],
+                num_steps=req_num_steps[batch_req_indices],
                 steps_dim_size=new_tokens_cuda.size(0),
                 slots_dim_size=new_tokens_cuda.size(1),
                 dim_order=_UnpackedStepIndexer.DimOrder.SLOT_MAJOR,
                 index_dtype=torch.int64,  # enforced by Tensor.scatter_
             )
-            batch_dest_probs_indices_cuda = batch_dest_probs_cuda_indexer[:]
+            batch_dest_probs_indices_cuda = batch_dest_probs_cuda_indexer[:].to(
+                batch_softmax_cuda.device, non_blocking=True)
             # NB: torch.arange is needed to enable "advanced indexing",
             #   cf. https://numpy.org/devdocs/user/basics.indexing.html#integer-array-indexing
             batch_token_probs = batch_softmax_cuda[
@@ -1414,7 +1406,6 @@ class TorchSampler(Sampler):
         seq_slots = torch.tensor([r.py_seq_slot for r in requests],
                                  dtype=torch.int32,
                                  pin_memory=True)
-        seq_slots_cuda = seq_slots.to(device=cuda_device, non_blocking=True)
 
         raw_logits_cuda = self._select_generated_logits(
             scheduled_requests,
@@ -1442,7 +1433,7 @@ class TorchSampler(Sampler):
             log_probs_host=log_probs_host,
             req_offsets=req_offsets,
             steps_dim_size=new_tokens_cuda.size(0),
-            req_num_steps_cuda=req_num_steps_cuda,
+            req_num_steps=req_num_steps,
         )
 
         # Fill results into output buffers
@@ -1450,8 +1441,8 @@ class TorchSampler(Sampler):
             batched_sampling_result,
             new_tokens_cuda=new_tokens_cuda,
             log_probs_host=log_probs_host,
-            req_num_steps_cuda=req_num_steps_cuda,
-            seq_slots_cuda=seq_slots_cuda,
+            req_num_steps=req_num_steps,
+            seq_slots=seq_slots,
         )
 
         # NB: update_requests syncs w/ device computation and async D2H copies
