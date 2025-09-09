@@ -683,7 +683,7 @@ def create_torch_sampler_args(mapping: Mapping, *, max_seq_len: int,
         max_seq_len=max_seq_len,
         max_draft_len=max_draft_len,
         max_num_sequences=max_num_sequences,
-        max_beam_width=executor_config.max_beam_width,
+        max_beam_width=max_beam_width,
     )
 
 
