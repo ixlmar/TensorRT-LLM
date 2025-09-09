@@ -1461,7 +1461,7 @@ class TorchSampler(Sampler):
         seq_slots: torch.Tensor,
         log_probs_host: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        beam = self.BEAM
+        beam = BEAM_0
         assert beam == 0, "beam_width != 1 not supported"
 
         batch_req_indices = batched_sampling_result.batch_req_indices
