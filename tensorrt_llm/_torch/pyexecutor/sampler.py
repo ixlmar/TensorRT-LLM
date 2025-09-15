@@ -487,7 +487,7 @@ class _BatchedSamplingResult:
     # Original request indices for all requests (permuted due to batching by strategy):
     batch_req_indices: torch.Tensor
     # Next tokens for all requests:
-    batch_next_tokens_cuda: torch.Tensor
+    batch_next_tokens_cuda_int: torch.Tensor
     # Probs for all requests which need them:
     batch_softmax_cuda: torch.Tensor
     # (request, batch_softmax indices), for requests having py_draft_logits / requesting py_target_probs:
@@ -1182,6 +1182,7 @@ class TorchSampler(Sampler):
         assert correct.is_cuda
         finish_reasons[0, first_slot, BEAM_0] = correct  # REF-D
 
+    @nvtx_range("_write_finish_reasons")
     def _write_finish_reasons(self, requests: list[LlmRequest], *,
                               finish_reasons: torch.Tensor,
                               seq_slots: torch.Tensor,
@@ -1329,6 +1330,7 @@ class TorchSampler(Sampler):
         req_num_steps: torch.Tensor,
         req_offsets: torch.Tensor,
         steps_dim_size: int,
+        token_dtype: torch.dtype,
     ) -> _BatchedSamplingResult:
         requests_by_strategy = _group_requests_by_sampling_strategy(
             requests, pin_memory=True)
@@ -1388,10 +1390,13 @@ class TorchSampler(Sampler):
                 speculation_softmax_indices = torch.arange(
                     len(speculation_group_indices), dtype=torch.int32)
 
-            group_logits_cuda_indices = logits_cuda_indexer[
-                group_req_indices].to(device=logits_cuda.device,
-                                      non_blocking=True)
-            group_logits_cuda = logits_cuda[group_logits_cuda_indices]
+            group_logits_cuda_indices = logits_cuda_indexer[group_req_indices]
+            if group_logits_cuda_indices.numel() != logits_cuda.size(0):
+                group_logits_cuda_indices_cuda = group_logits_cuda_indices.to(
+                    device=logits_cuda.device, non_blocking=True)
+                group_logits_cuda = logits_cuda[group_logits_cuda_indices_cuda]
+            else:
+                group_logits_cuda = logits_cuda
 
             # Indexer for accessing tokens in 'group_logits_cuda' (and 'group_next_tokens_cuda')
             # corresponding to the requests in 'group_req_indices'.
@@ -1426,13 +1431,21 @@ class TorchSampler(Sampler):
                 softmax_indices=cast(torch.IntTensor,
                                      softmax_group_indices_cuda),
             )
+            group_next_tokens_cuda_int = group_next_tokens_cuda.to(
+                dtype=token_dtype, non_blocking=True)
             batched_results.append(
-                (group_req_indices, group_next_tokens_cuda, group_softmax_cuda))
+                (group_req_indices, group_next_tokens_cuda_int,
+                 group_softmax_cuda))
             softmax_index_offset += group_softmax_cuda.size(0)
         # Batched sampling results, see _BatchedSamplingResult for details.
-        batch_req_indices = torch.cat([res[0] for res in batched_results])
-        batch_next_tokens_cuda = torch.cat([res[1] for res in batched_results])
-        batch_softmax_cuda = torch.cat([res[2] for res in batched_results])
+        if len(batched_results) > 1:
+            batch_req_indices = torch.cat([res[0] for res in batched_results])
+            batch_next_tokens_cuda_int = torch.cat(
+                [res[1] for res in batched_results])
+            batch_softmax_cuda = torch.cat([res[2] for res in batched_results])
+        else:
+            (batch_req_indices, batch_next_tokens_cuda_int,
+             batch_softmax_cuda), = batched_results
 
         # FIXME: This should be done in ModelDrafter.prepare_draft_tokens, but for performance
         #        parity py_draft_tokens might need to be replaced / backed by a torch.Tensor, so
@@ -1443,11 +1456,11 @@ class TorchSampler(Sampler):
             #     case there are 1 + get_draft_token_length(request) tokens per request. In the
             #     latter case, only there is always only 1 token per request because draft
             #     tokens are sampled one-by-one.
-            self._apply_d2t(batch_next_tokens_cuda, model_outputs)
+            self._apply_d2t(batch_next_tokens_cuda_int, model_outputs)
 
         return _BatchedSamplingResult(
             batch_req_indices=batch_req_indices,
-            batch_next_tokens_cuda=batch_next_tokens_cuda,
+            batch_next_tokens_cuda_int=batch_next_tokens_cuda_int,
             batch_softmax_cuda=batch_softmax_cuda,
             py_draft_logits_indices=py_draft_logits_indices,
         )
@@ -1465,7 +1478,7 @@ class TorchSampler(Sampler):
         assert beam == 0, "beam_width != 1 not supported"
 
         batch_req_indices = batched_sampling_result.batch_req_indices
-        batch_next_tokens_cuda = batched_sampling_result.batch_next_tokens_cuda
+        batch_next_tokens_cuda_int = batched_sampling_result.batch_next_tokens_cuda_int
         batch_softmax_cuda = batched_sampling_result.batch_softmax_cuda
         py_draft_logits_indices = batched_sampling_result.py_draft_logits_indices
 
@@ -1501,8 +1514,6 @@ class TorchSampler(Sampler):
         )
 
         # Batch update output tensors
-        batch_next_tokens_cuda_int = batch_next_tokens_cuda.to(
-            dtype=new_tokens_cuda.dtype, non_blocking=True)
         batch_dest_indices_1d_cuda = batch_destination_cuda_indexer[:].to(
             new_tokens_cuda.device, non_blocking=True)
         new_tokens_cuda.view(-1,
@@ -1555,7 +1566,7 @@ class TorchSampler(Sampler):
         scheduled_requests: ScheduledRequests,
         raw_logits_cuda: torch.Tensor,
         *,
-        req_num_generation_steps_cuda: torch.Tensor,
+        req_num_generation_steps: torch.Tensor,
         num_context_logits_prefix_sum: list[int],
         generation_requests_total_steps: int,
     ) -> torch.Tensor:
@@ -1568,6 +1579,8 @@ class TorchSampler(Sampler):
                for r in scheduled_requests.context_requests):
             assert len(num_context_logits_prefix_sum) == len(
                 scheduled_requests.context_requests) + 1
+            req_num_generation_steps_cuda = req_num_generation_steps.to(
+                raw_logits_cuda.device, non_blocking=True)
             context_req_offsets_cuda = torch.tensor(
                 num_context_logits_prefix_sum,
                 dtype=torch.int32,
@@ -1607,6 +1620,7 @@ class TorchSampler(Sampler):
             raw_logits_cuda = raw_logits_cuda[indices_to_keep_cuda]
         return raw_logits_cuda
 
+    @nvtx_range("_process_requests")
     def _process_requests(
             self,
             scheduled_requests: ScheduledRequests,
@@ -1626,7 +1640,6 @@ class TorchSampler(Sampler):
             [1 + get_draft_token_length(req) for req in requests],
             dtype=torch.int32,
             pin_memory=True)
-        req_num_steps_cuda = req_num_steps.to(cuda_device, non_blocking=True)
         # NB: These offsets consider generated tokens _only_ (draft and target, but not context)
         #     and are thus only correct after _select_generated_logits() below.
         req_offsets, sum_steps = _PackedStepIndexer.calculate_request_offsets(
@@ -1635,7 +1648,7 @@ class TorchSampler(Sampler):
         raw_logits_cuda = self._select_generated_logits(
             scheduled_requests,
             raw_logits_cuda,
-            req_num_generation_steps_cuda=req_num_steps_cuda,
+            req_num_generation_steps=req_num_steps,
             num_context_logits_prefix_sum=num_context_logits_prefix_sum,
             generation_requests_total_steps=(
                 # NB: requests == scheduled_requests.context_requests + scheduled_requests.generation_requests
@@ -1659,6 +1672,7 @@ class TorchSampler(Sampler):
             req_offsets=req_offsets,
             steps_dim_size=new_tokens_cuda.size(0),
             req_num_steps=req_num_steps,
+            token_dtype=new_tokens_cuda.dtype,
         )
 
         # Fill results into output buffers
