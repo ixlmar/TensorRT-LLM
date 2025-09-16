@@ -12,8 +12,7 @@ from ..pyexecutor.guided_decoder import GuidedDecoder
 from ..pyexecutor.handle_logits import HandleLogits
 from ..pyexecutor.llm_request import LlmRequest, LlmRequestState
 from ..pyexecutor.resource_manager import BaseResourceManager, ResourceManager
-from ..pyexecutor.sampler import (Sampler, SampleState, SampleStateTensors,
-                                  TorchSampler)
+from ..pyexecutor.sampler import Sampler, SampleState, SampleStateTensors
 from ..pyexecutor.scheduler import ScheduledRequests
 from ..pyexecutor.seq_slot_manager import SeqSlotManager
 from ..speculative.mtp import SampleStateTensorsMTP
