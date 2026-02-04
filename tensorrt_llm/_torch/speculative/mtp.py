@@ -13,7 +13,7 @@ from ..distributed.ops import allgather
 from ..model_config import ModelConfig
 from ..pyexecutor.llm_request import LlmRequest, LlmRequestState
 from ..pyexecutor.resource_manager import BaseResourceManager, SlotManager
-from ..pyexecutor.sampler import (DEFAULT_BEAM_IDX, SampleState,
+from ..pyexecutor.sampler import (DEFAULT_BEAM_IDX, Sampler, SampleState,
                                   SampleStateTensors, TorchSampler, add_token,
                                   int_tensor)
 from ..pyexecutor.scheduler import ScheduledRequests
@@ -30,9 +30,8 @@ class SampleStateTensorsMTP(SampleStateTensors):
 
 
 @dataclass(kw_only=True)
-class SampleStateMTP(SampleState):
-    device: SampleStateTensorsMTP
-    host: SampleStateTensorsMTP
+class SampleStateMTP(SampleState[SampleStateTensorsMTP, SampleStateTensorsMTP]):
+    pass
 
 
 class MTPHiddenStatesManager(BaseResourceManager):
@@ -210,7 +209,7 @@ class MTPSpecMetadata(SpecMetadata):
             self.slot_ids[:num_seqs].copy_(mtp_slot_ids, non_blocking=True)
 
 
-class MTPSampler(TorchSampler):
+class MTPSampler(Sampler[SampleStateMTP]):
     """
     MTP sampler.
     """
