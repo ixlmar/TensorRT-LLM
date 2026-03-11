@@ -1020,6 +1020,15 @@ def main(*,
             f'\"{venv_python}\" -m build {project_dir} --skip-dependency-check --no-isolation --wheel --outdir "{dist_dir}"',
             env=env)
 
+    if not cpp_only and sys.version_info >= (
+            3, 11) and platform.machine() != "aarch64":
+        print("-- Running mypy type check with compiled bindings...")
+        pre_commit_exe = venv_python.parent / "pre-commit"
+        env = os.environ.copy()
+        env["PATH"] = str(venv_python.parent) + os.pathsep + env.get("PATH", "")
+        env["MYPY_REQUIRE_BINDINGS"] = "1"
+        build_run(f'"{pre_commit_exe}" run type-check --all-files', env=env)
+
     if install:
         build_run(f"\"{sys.executable}\" -m pip install -e .[devel]")
 

@@ -1499,9 +1499,9 @@ repos:
         language: script
         files: ^(tensorrt_llm|triton_backend)/.*\.py$
     -   id:  type-check
-        name: Run static analysis of type correctness using mypy (use SKIP='type-check' env. var. to bypass)
-        entry: mypy
-        language: python
+        name: Run static analysis of type correctness using mypy
+        entry: scripts/run_mypy.sh
+        language: script
         verbose: true
         require_serial: true  # because of install_types=true
         files: *static_analysis_files
